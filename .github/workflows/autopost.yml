@@ -1,0 +1,71 @@
+name: Auto-post news
+
+on:
+  schedule:
+    # Every hour at minute 17 (UTC). Odd minutes are less crowded than :00 on GitHub.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to do"
+        type: choice
+        default: normal
+        options:
+          - normal
+          - dry-run
+          - test-connection
+
+permissions:
+  contents: write   # needed to save seen.json back to the repository
+
+concurrency:
+  group: autopost   # two runs never overlap
+  cancel-in-progress: false
+
+jobs:
+  autopost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the auto-poster
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          MODE: ${{ inputs.mode || 'normal' }}
+        run: |
+          case "$MODE" in
+            dry-run)         python autopost.py --dry-run ;;
+            test-connection) python autopost.py --test-connection ;;
+            *)               python autopost.py ;;
+          esac
+
+      - name: Save seen.json (so nothing is posted twice)
+        # Also runs when the script failed, so items that WERE posted are still remembered.
+        if: success() || failure()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen.json
+          if git diff --cached --quiet; then
+            echo "seen.json did not change - nothing to save."
+            exit 0
+          fi
+          git commit -m "Update seen.json [skip ci]"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

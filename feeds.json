@@ -1,0 +1,28 @@
+{
+  "settings": {
+    "post_status": "draft",
+    "language": "English",
+    "article_words": 400,
+    "max_posts_per_run": 6,
+    "max_posts_per_feed": 2,
+    "items_to_check_per_feed": 10,
+    "delay_between_posts_sec": 15,
+    "skip_backlog_on_first_run": true,
+    "author_id": null,
+    "featured_image": true
+  },
+  "feeds": [
+    {
+      "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+      "category_id": 1,
+      "category_name": "World",
+      "source_name": "BBC News"
+    },
+    {
+      "url": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+      "category_id": 1,
+      "category_name": "Technology",
+      "source_name": "BBC News"
+    }
+  ]
+}
