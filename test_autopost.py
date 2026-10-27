@@ -93,6 +93,23 @@ class FakeWeb:
         self.wp_auth_ok = True
         self.image_ok = True
         self.post_status_code = 201
+        # Where the fake site's REST API lives:
+        #   "normal" /wp-json/, "plain" ?rest_route= (Plain permalinks), "blog" WordPress in /blog,
+        #   "none" no WordPress at all (every address gives the web server's 404 page)
+        self.site = "normal"
+
+    def api_prefix(self):
+        return {"normal": WP + "/wp-json/wp/v2", "plain": WP + "/?rest_route=/wp/v2",
+                "blog": WP + "/blog/wp-json/wp/v2"}.get(self.site)
+
+    def homepage(self):
+        if self.site == "plain":
+            return response(content=b"<html>wp-content</html>", url=WP + "/",
+                            headers={"Link": f'<{WP}/?rest_route=/>; rel="https://api.w.org/"'})
+        if self.site == "blog":
+            html = f'<html><head><link rel="https://api.w.org/" href="{WP}/blog/wp-json/" /></head></html>'
+            return response(content=html.encode(), url=WP + "/")
+        return response(404, content=b"404 Not Found Proudly powered by LiteSpeed Web Server", url=WP + "/")
 
     def __call__(self, session, method, url, **kwargs):
         method = method.upper()
@@ -117,10 +134,11 @@ class FakeWeb:
                 return response(404, content=b"not found")
             return response(content=b"\xff\xd8\xff fake jpeg", headers={"Content-Type": "image/jpeg"})
 
-        if url.startswith(WP + "/wp-json/wp/v2/"):
+        prefix = self.api_prefix()
+        if prefix and url.startswith(prefix + "/"):
             if not self.wp_auth_ok:
                 return response(401, {"code": "incorrect_password", "message": "The provided password is invalid."})
-            path = url[len(WP + "/wp-json/wp/v2"):]
+            path = url[len(prefix):]
             if method == "GET" and path == "/users/me":
                 return response(200, {"id": 3, "name": "Editor", "roles": ["editor"]})
             if method == "GET" and path == "/categories":
@@ -144,6 +162,11 @@ class FakeWeb:
                 self.posts.append(kwargs["json"])
                 post_id = 1000 + len(self.posts)
                 return response(201, {"id": post_id, "status": kwargs["json"]["status"], "link": f"{WP}/?p={post_id}"})
+        if url == WP + "/":
+            return self.homepage()
+        if url.startswith(WP + "/"):
+            return response(404, content=b"404 Not Found The resource requested could not be found on this server! "
+                                         b"Proudly powered by LiteSpeed Web Server")
         raise AssertionError(f"Unexpected request: {method} {url}")
 
     def count(self, method, pattern):
@@ -395,6 +418,39 @@ class TestRuns(AutopostTestCase):
         self.assertIn("2 post(s) would be written", out)
         self.assertIn("Story zero", out)
         self.assertIn("https://img.example/zero.jpg", out)
+
+
+class TestFindingTheRestApi(AutopostTestCase):
+    def test_plain_permalinks_site_uses_rest_route(self):
+        self.web.site = "plain"
+        self.assertEqual(self.run_autopost(), 0)
+        self.assertEqual(len(self.web.posts), 2)
+        self.assertEqual(self.web.count("POST", r"\?rest_route=/wp/v2/posts$"), 2)
+        self.assertIn("REST API is at https://mysite.example/?rest_route=/", self.output())
+
+    def test_wordpress_in_a_subfolder_is_found(self):
+        self.web.site = "blog"
+        self.assertEqual(self.run_autopost(), 0)
+        self.assertEqual(self.web.count("POST", r"/blog/wp-json/wp/v2/posts$"), 2)
+
+    def test_real_error_is_shown_after_finding_the_api(self):
+        # /wp-json/ gives a server 404, but ?rest_route= reaches WordPress, which says "wrong password".
+        self.web.site = "plain"
+        self.web.wp_auth_ok = False
+        self.assertEqual(self.run_autopost(), 1)
+        out = self.output()
+        self.assertIn("401 = wrong username or Application Password", out)
+        self.assertNotIn("404", out)
+
+    def test_no_wordpress_at_this_address(self):
+        self.web.site = "none"
+        self.assertEqual(self.run_autopost(), 1)
+        self.assertEqual(self.web.ai_calls, 0)
+        out = self.output()
+        self.assertIn("No WordPress REST API was found at https://mysite.example", out)
+        self.assertIn("does not look like a WordPress site", out)
+        self.assertIn("Settings > Permalinks", out)
+        self.assertIn("the web server said", out)
 
 
 class TestConnection(AutopostTestCase):

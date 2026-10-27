@@ -482,6 +482,8 @@ def explain_wp_error(status, body, raw_text=""):
     elif status == 403:
         hint = ("403 = logged in but not allowed. The WordPress user needs the Administrator or Editor "
                 "role, or a security plugin / firewall (Wordfence, Cloudflare, your host) is blocking the REST API.")
+    elif status == 404 and not isinstance(body, dict):
+        hint = "404 = the web server found nothing at this address (this answer did not come from WordPress)."
     elif status == 404:
         hint = ("404 = not found. Check WP_URL (like https://example.com, without /wp-admin) "
                 "and that the REST API is not disabled by a plugin.")
@@ -493,7 +495,8 @@ def explain_wp_error(status, body, raw_text=""):
     else:
         hint = f"HTTP {status}"
     details = " ".join(x for x in (wp_code, wp_msg) if x)
-    return f"{hint}" + (f" (WordPress said: {details})" if details else "")
+    who = "WordPress" if isinstance(body, dict) else "the web server"
+    return f"{hint}" + (f" ({who} said: {details})" if details else "")
 
 
 class WordPress:
@@ -504,13 +507,13 @@ class WordPress:
         self.session = requests.Session()
         self.session.auth = (user, app_password)
         self.session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
-        self.use_rest_route = False   # fallback for sites without "pretty" permalinks
+        # Where the REST API lives. me() changes it if the site uses another address
+        # (e.g. https://example.com/?rest_route=/ on sites with "Plain" permalinks).
+        self.api_root = self.base + "/wp-json/"
         self._tag_cache = {}
 
     def _url(self, path):
-        if self.use_rest_route:
-            return f"{self.base}/?rest_route=/wp/v2{path}"
-        return f"{self.base}/wp-json/wp/v2{path}"
+        return f"{self.api_root}wp/v2{path}"
 
     def request(self, method, path, **kwargs):
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
@@ -523,27 +526,88 @@ class WordPress:
         except ValueError:
             body = None
         if resp.status_code >= 400:
-            raise WordPressError(explain_wp_error(resp.status_code, body, resp.text), resp.status_code, body)
+            message = explain_wp_error(resp.status_code, body, resp.text)
+            if resp.history and urlparse(resp.url).netloc != urlparse(self.base).netloc:
+                message += f" Note: {self.base} redirects to {resp.url} - put that address in WP_URL."
+            raise WordPressError(message, resp.status_code, body)
         if body is None:
             raise WordPressError(
                 f"WordPress answered with a web page instead of JSON ({body_snippet(resp, 150)}). "
-                "Check WP_URL, and whether a security/caching plugin or your host blocks the REST API."
+                "Check WP_URL, and whether a security/caching plugin or your host blocks the REST API.",
+                resp.status_code,
             )
         return body
 
     def me(self):
-        """GET /users/me - proves the login works. Falls back to ?rest_route= on 404."""
+        """GET /users/me - proves the login works.
+
+        If the usual /wp-json/ address does not answer like WordPress, ask the homepage where
+        the REST API really is (subfolder installs, "Plain" permalinks, www redirects) and use that."""
         try:
             return self.request("GET", "/users/me", params={"context": "edit"})
         except WordPressError as exc:
-            if exc.status != 404 or self.use_rest_route:
-                raise
-            self.use_rest_route = True
+            if exc.status is None or exc.body:
+                raise  # no connection at all, or WordPress itself answered (e.g. 401): report as is
+            first_error = exc
+
+        original_root = self.api_root
+        discovered, homepage_note = self.discover_api_root()
+        roots = []
+        for root in (discovered, self.base + "/?rest_route=/"):
+            if root and root != original_root and root not in roots:
+                roots.append(root)
+        for root in roots:
+            self.api_root = root
             try:
-                return self.request("GET", "/users/me", params={"context": "edit"})
-            except WordPressError:
-                self.use_rest_route = False
-                raise exc from None
+                user = self.request("GET", "/users/me", params={"context": "edit"})
+                log.info("  Note: this site's REST API is at %s - using that address.", root)
+                return user
+            except WordPressError as exc:
+                if exc.body:
+                    raise  # WordPress answered at this address (e.g. 401), so this is the real problem
+        self.api_root = original_root
+        raise WordPressError(
+            f"No WordPress REST API was found at {self.base}. {homepage_note}. What to check: "
+            f"(1) WP_URL must be exactly the address of your site's homepage as your browser shows it "
+            f"(https, with or without www). "
+            f"(2) If WordPress is installed in a folder, include it, like https://example.com/blog . "
+            f"(3) In WordPress go to Settings > Permalinks and click 'Save Changes' - this repairs the "
+            f"/wp-json/ address on LiteSpeed/Apache hosts. "
+            f"(4) Open {self.base}/wp-json/ in your browser: it should show text starting with {{\"name\":. "
+            f"[First answer: {first_error}]",
+            first_error.status,
+        ) from None
+
+    def discover_api_root(self):
+        """Read the REST API address the homepage announces (Link header or <link rel="https://api.w.org/">).
+        Returns (api_root or None, a sentence describing what the homepage showed)."""
+        home = self.base + "/"
+        try:
+            resp = requests.get(home, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT)
+        except requests.RequestException as exc:
+            return None, f"Opening the homepage {home} failed ({exc})"
+        text = resp.text[:300000] if resp.text else ""
+        root = resp.links.get("https://api.w.org/", {}).get("url")
+        if not root:
+            for tag in re.findall(r"<link\b[^>]*>", text, re.I):
+                match = re.search(r"""href=["']([^"']+)""", tag)
+                if "api.w.org" in tag and match:
+                    root = html.unescape(match.group(1))
+                    break
+        if root and not root.endswith("/"):
+            root += "/"
+
+        moved = urlparse(resp.url or home).netloc != urlparse(home).netloc
+        if moved:
+            note = f"The homepage redirects to {resp.url} - put that address in WP_URL"
+        elif root:
+            note = f"The homepage says its REST API is at {root}, but it did not answer there"
+        elif "wp-content" in text:
+            note = ("The homepage looks like WordPress but does not announce a REST API address "
+                    "(a security plugin may be hiding or switching off the REST API)")
+        else:
+            note = f"The homepage answered HTTP {resp.status_code} and does not look like a WordPress site"
+        return root, note
 
     def categories(self):
         return self.request("GET", "/categories", params={"per_page": 100, "orderby": "id", "order": "asc"})
