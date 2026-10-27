@@ -212,7 +212,8 @@ python -m unittest -v
 
 | Message in the log | What it means / what to do |
 |---|---|
-| `401 = wrong username or Application Password` | Check `WP_USER` (username) and `WP_APP_PASSWORD` (the **Application** Password, not your normal one). If both are definitely right, your host may be removing the login header. Ask your host to "pass the HTTP Authorization header to PHP", or add this line to the top of your site's `.htaccess`: `SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1` |
+| `401 = wrong username or Application Password` | Check `WP_USER` (username) and `WP_APP_PASSWORD` (the **Application** Password, not your normal one). |
+| `401 = WordPress did not receive any login at all` (`rest_not_logged_in`) | Your web server (often LiteSpeed or Apache) drops the login before it reaches WordPress. **If your permalinks are set to "Plain"**, go to **Settings → Permalinks**, choose **Post name**, and click **Save Changes**. WordPress then writes `.htaccess` rules that let the login through, and `/wp-json/` starts working too. Old `?p=123` links still redirect to the new addresses. **Otherwise**, add these two lines at the top of `.htaccess` in your site's main folder (hosting File Manager → `public_html`): `RewriteEngine On` and `RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]`. Or ask your host to "pass the HTTP Authorization header to PHP". |
 | `403 = logged in but not allowed` | Give the user the **Editor** or **Administrator** role. Or a security plugin (Wordfence, iThemes, etc.), Cloudflare, or your host is blocking the REST API or GitHub's servers. Allow `/wp-json/` in that tool. |
 | `404 = not found` | Check `WP_URL`. Make sure no plugin disables the REST API. |
 | `answered with a web page instead of JSON` | Your host or a plugin shows a "checking your browser" / captcha page to robots. This often happens on very cheap or free hosting. Allow the REST API in that tool, or use a different host. |

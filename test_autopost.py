@@ -537,11 +537,24 @@ class TestCheckWp(AutopostTestCase):
         self.assertEqual(self.check(), 1)
         out = self.output()
         self.assertIn("WordPress did not receive any login at all", out)
-        self.assertIn("SetEnvIf Authorization", out)
+        self.assertIn("RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]", out)
+        self.assertNotIn("Post name", out)   # permalinks are already fine on this site
+
+    def test_plain_permalinks_and_login_header_stripped(self):
+        # What LiteSpeed hosts with "Plain" permalinks show: no .htaccess rules, so no login gets through.
+        self.web.site = "plain"
+        self.web.wp_auth_ok = False
+        self.web.auth_error_code = "rest_not_logged_in"
+        self.assertEqual(self.check(), 1)
+        out = self.output()
+        self.assertIn("Settings > Permalinks > choose 'Post name'", out)
+        self.assertIn("RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]", out)
 
     def test_normal_password_is_flagged(self):
         self.check(password="MyDogRex2020!")
-        self.assertIn("does not look like an Application Password", self.output())
+        out = self.output()
+        self.assertIn("Password:     13 characters\n  WARN  This does not look like an Application Password", out)
+        self.assertIn("Users > Profile > Application Passwords", out)
 
     def test_author_cannot_create_tags(self):
         self.web.capabilities = {"edit_posts": True, "publish_posts": True, "upload_files": True}

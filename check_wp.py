@@ -76,10 +76,12 @@ class Report:
 def check_password_format(password, r):
     compact = re.sub(r"\s+", "", password)
     if re.fullmatch(r"[A-Za-z0-9]{24}", compact):
-        return "24 characters - looks like an Application Password"
+        print("Password:     24 characters - looks like an Application Password")
+        return
+    print(f"Password:     {len(compact)} characters")
     r.warn("This does not look like an Application Password (those have 24 letters/numbers, "
            "shown as 6 groups of 4). Your normal login password will NOT work here.")
-    return f"{len(compact)} characters"
+    r.tip("Create one: WordPress dashboard > Users > Profile > Application Passwords > Add New.")
 
 
 def check_homepage(base, r):
@@ -187,9 +189,20 @@ def check_login(wp, r):
     except WordPressError as exc:
         r.fail(str(exc))
         if exc.body.get("code") == "rest_not_logged_in":
-            r.tip('Fix: add this line at the top of the .htaccess file in your site\'s main folder:')
-            r.tip('SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1')
-            r.tip("or ask your host to 'pass the HTTP Authorization header to PHP'.")
+            if "rest_route=" in wp.api_root:
+                # "Plain" permalinks: WordPress has not written its .htaccess rules, which include
+                # the line that passes the login (Authorization header) on to WordPress.
+                r.tip("Easiest fix: Settings > Permalinks > choose 'Post name' > Save Changes.")
+                r.tip("WordPress then writes .htaccess rules that pass the login through, and /wp-json/ starts working.")
+                r.tip("Old links like ?p=123 keep working - WordPress redirects them to the new addresses.")
+                r.tip("Or, to keep 'Plain' permalinks, add these 2 lines at the top of the .htaccess file")
+                r.tip("in your site's main folder (hosting File Manager > public_html):")
+            else:
+                r.tip("Fix: add these 2 lines at the top of the .htaccess file in your site's main folder")
+                r.tip("(hosting File Manager > public_html):")
+            r.tip("    RewriteEngine On")
+            r.tip("    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]")
+            r.tip("Or ask your host to 'pass the HTTP Authorization header to PHP'.")
         return None
     roles = me.get("roles") or []
     r.ok(f"Logged in as '{me.get('name')}' (user id {me.get('id')}"
@@ -248,7 +261,7 @@ def run(url, user, password):
     print("=" * 72)
     print(f"Site address: {base}")
     print(f"Username:     {user}")
-    print(f"Password:     {check_password_format(password, r)}")
+    check_password_format(password, r)
     total = 5
 
     r.step(1, total, "Opening the homepage...")
