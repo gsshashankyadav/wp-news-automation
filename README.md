@@ -95,6 +95,7 @@ Open `feeds.json` in any text editor (Notepad works). It has two parts.
 | `skip_backlog_on_first_run` | `true` | On the very first run (or when you add a new feed), post only the newest few items and mark the older ones as done, so your site isn't flooded with old news. |
 | `author_id` | `null` | `null` = posts belong to the user from Step 1. Put a user ID number to post as someone else. |
 | `featured_image` | `true` | If the RSS item has a picture, upload it and use it as the featured image. If that fails, the post is still created, just without the image. |
+| `wp_request_delay_sec` | `2` | Seconds to wait between requests to your website. Each post needs about 10–15 requests (tags, image, post). Raise this if your host answers "429 too many requests". |
 
 > `feeds.json` must stay valid JSON. Use double quotes `"`, separate items with commas, and put **no** comma after the last item. If you get it wrong, the script tells you the line number. You can also check the file at <https://jsonlint.com>.
 
@@ -217,6 +218,8 @@ python -m unittest -v
 | `403 = logged in but not allowed` | Give the user the **Editor** or **Administrator** role. Or a security plugin (Wordfence, iThemes, etc.), Cloudflare, or your host is blocking the REST API or GitHub's servers. Allow `/wp-json/` in that tool. |
 | `404 = not found` | Check `WP_URL`. Make sure no plugin disables the REST API. |
 | `answered with a web page instead of JSON` | Your host or a plugin shows a "checking your browser" / captcha page to robots. This often happens on very cheap or free hosting. Allow the REST API in that tool, or use a different host. |
+| `429 = ... 'too many requests'` / `Rate limit exceeded` | Your hosting firewall thinks the auto-poster sends too many requests. The script already waits and retries, and then stops the run so no AI articles are wasted. Raise `wp_request_delay_sec` (try `5`). If it still happens, your host is limiting GitHub's servers specifically: ask them to relax the "rate limit for `/wp-json/`", or run the auto-poster from your own computer instead. |
+| `Could not add the featured image (HTTP 406 ...)` | A hosting firewall (ModSecurity) blocked the image upload. Images are sent as normal file uploads, the format that firewall usually accepts. If it still happens, set `"featured_image": false`. |
 | `400 = WordPress rejected the data` | Usually a `category_id` or `author_id` in `feeds.json` that doesn't exist. Run **test-connection** to see your real IDs. |
 | `No "Application Passwords" section` | The site must use HTTPS. Some security plugins have a switch to turn the feature back on. |
 | `AI rate limit was reached` | Normal on the free tier. The run stops and continues next hour. If it happens a lot, lower `max_posts_per_run`, raise `delay_between_posts_sec`, try a lighter model such as `gemini-2.5-flash-lite` (secret `AI_MODEL`), or switch to Groq. |

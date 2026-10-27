@@ -104,7 +104,10 @@ class FakeWeb:
                              "manage_categories": True}
         self.home_setting = WP           # the "home" address WordPress reports about itself
         self.login_fix = None            # what wordpress-login-fix.php reports: None, "missing", "received"
-        self.redirect_api_to = None      # e.g. "https://www.mysite.example/..." -> API answers 301
+        self.redirect_api_to = None
+        self.post_429_left = 0           # the next N POSTs get "429 Rate limit exceeded" (hosting firewall)
+        self.post_429_forever = False
+        self.retry_after = None      # e.g. "https://www.mysite.example/..." -> API answers 301
         self.sessions = []               # requests.Session objects used (to inspect their headers)
 
     def api_prefix(self):
@@ -158,6 +161,10 @@ class FakeWeb:
         if prefix and url.startswith(prefix + "/"):
             if self.redirect_api_to:
                 return response(301, content=b"", headers={"Location": self.redirect_api_to})
+            if method == "POST" and (self.post_429_forever or self.post_429_left > 0):
+                self.post_429_left -= 1
+                headers = {"Retry-After": self.retry_after} if self.retry_after else {}
+                return response(429, content=b"Rate limit exceeded. Please retry later.", headers=headers)
             if not self.wp_auth_ok:
                 headers = {"X-Autopost-Login-Fix": f"v2; login={self.login_fix}"} if self.login_fix else {}
                 return response(401, {"code": self.auth_error_code, "message": "Sorry, you could not log in."},
@@ -471,6 +478,54 @@ class TestLoginDelivery(AutopostTestCase):
         for _, url, kwargs in self.web.calls:
             if url.startswith(WP + "/wp-json/"):
                 self.assertFalse(kwargs.get("allow_redirects", True))
+
+
+class TestHostingFirewall(AutopostTestCase):
+    def sleeps(self):
+        return [c.args[0] for c in autopost.time.sleep.call_args_list]
+
+    def test_image_is_sent_as_a_normal_file_upload(self):
+        # Raw uploads get "406 Not Acceptable" from some hosting firewalls (ModSecurity).
+        self.run_autopost()
+        uploads = [kw for m, u, kw in self.web.calls if m == "POST" and u.endswith("/media")]
+        self.assertTrue(uploads)
+        name, data, ctype = uploads[0]["files"]["file"]
+        self.assertEqual((name, ctype), ("zero.jpg", "image/jpeg"))
+        self.assertNotIn("data", uploads[0])
+
+    def test_short_rate_limit_is_waited_out(self):
+        self.web.post_429_left = 2
+        self.assertEqual(self.run_autopost(), 0)
+        self.assertEqual(len(self.web.posts), 2)
+        self.assertIn(30, self.sleeps())
+        self.assertIn(60, self.sleeps())
+        self.assertIn("too many requests' (HTTP 429) - waiting 30 seconds", self.output())
+
+    def test_retry_after_header_is_used(self):
+        self.web.post_429_left = 1
+        self.web.retry_after = "7"
+        self.run_autopost()
+        self.assertIn(7, self.sleeps())
+        self.assertNotIn(30, self.sleeps())
+
+    def test_lasting_rate_limit_stops_the_run(self):
+        self.web.post_429_forever = True
+        self.assertEqual(self.run_autopost(), 1)
+        self.assertEqual(self.web.ai_calls, 1)   # no more AI articles written that cannot be saved
+        self.assertEqual(self.web.posts, [])
+        self.assertNotIn("guid-0", self.seen())
+        out = self.output()
+        self.assertIn("429 = your website (or its hosting firewall) says 'too many requests'", out)
+        self.assertIn("stopped early: your website's rate limit", out)
+
+    def test_requests_to_wordpress_are_spaced_out(self):
+        self.run_autopost()
+        self.assertTrue(any(1.5 < sec <= 2 for sec in self.sleeps()))
+
+    def test_spacing_can_be_turned_off(self):
+        self.write_config(wp_request_delay_sec=0)
+        self.run_autopost()
+        self.assertEqual(self.sleeps(), [])
 
 
 class TestFindingTheRestApi(AutopostTestCase):

@@ -9,7 +9,8 @@
     "delay_between_posts_sec": 15,
     "skip_backlog_on_first_run": true,
     "author_id": null,
-    "featured_image": true
+    "featured_image": true,
+    "wp_request_delay_sec": 2
   },
   "feeds": [
     {

@@ -56,6 +56,8 @@ HTTP_TIMEOUT = 30                    # seconds for feeds / WordPress / images
 AI_TIMEOUT = 120                     # seconds for one AI answer
 MAX_IMAGE_BYTES = 10 * 1024 * 1024   # skip featured images bigger than 10 MB
 MAX_SUMMARY_CHARS = 4000             # how much of the RSS summary is sent to the AI
+WP_429_RETRIES = 2                   # extra tries when the website answers "too many requests"
+WP_429_MAX_WAIT = 120                # never wait longer than this (seconds) for one retry
 
 DEFAULT_SETTINGS = {
     "post_status": "draft",
@@ -68,10 +70,11 @@ DEFAULT_SETTINGS = {
     "skip_backlog_on_first_run": True,
     "author_id": None,
     "featured_image": True,
+    "wp_request_delay_sec": 2,
 }
 INT_SETTINGS = (
     "article_words", "max_posts_per_run", "max_posts_per_feed",
-    "items_to_check_per_feed", "delay_between_posts_sec",
+    "items_to_check_per_feed", "delay_between_posts_sec", "wp_request_delay_sec",
 )
 
 log = logging.getLogger("autopost")
@@ -103,6 +106,10 @@ class WordPressError(Exception):
         self.status = status
         self.body = body if isinstance(body, dict) else {}
         self.headers = headers or {}
+
+
+class WordPressRateLimitError(WordPressError):
+    """The website (or its hosting firewall) keeps answering HTTP 429 "too many requests"."""
 
 
 # --------------------------------------------------------------------------- helpers
@@ -500,6 +507,9 @@ def explain_wp_error(status, body, raw_text=""):
     elif status == 404:
         hint = ("404 = not found. Check WP_URL (like https://example.com, without /wp-admin) "
                 "and that the REST API is not disabled by a plugin.")
+    elif status == 429:
+        hint = ("429 = your website (or its hosting firewall) says 'too many requests'. The run stops "
+                "and tries again next hour. If this keeps happening, see README > Troubleshooting.")
     elif status == 400:
         hint = ("400 = WordPress rejected the data. Often a category_id or author_id in feeds.json "
                 "that does not exist on your site.")
@@ -510,6 +520,14 @@ def explain_wp_error(status, body, raw_text=""):
     details = " ".join(x for x in (wp_code, wp_msg) if x)
     who = "WordPress" if isinstance(body, dict) else "the web server"
     return f"{hint}" + (f" ({who} said: {details})" if details else "")
+
+
+def retry_after_seconds(resp):
+    """The Retry-After header in seconds (capped), or None."""
+    try:
+        return max(1, min(WP_429_MAX_WAIT, int(float(resp.headers.get("Retry-After", "")))))
+    except (TypeError, ValueError):
+        return None
 
 
 def login_fix_state(headers):
@@ -558,6 +576,8 @@ class WordPress:
         # Where the REST API lives. me() changes it if the site uses another address
         # (e.g. https://example.com/?rest_route=/ on sites with "Plain" permalinks).
         self.api_root = self.base + "/wp-json/"
+        self.request_delay = 0        # seconds between requests (setting wp_request_delay_sec)
+        self._last_request = None
         self._tag_cache = {}
 
     def _url(self, path):
@@ -568,10 +588,19 @@ class WordPress:
         # No redirects: they would carry the X-WP-Authorization login to whatever address
         # they point at, and they turn POSTs into GETs anyway.
         kwargs.setdefault("allow_redirects", False)
-        try:
-            resp = self.session.request(method, self._url(path), **kwargs)
-        except requests.RequestException as exc:
-            raise WordPressError(f"could not connect to {self.base}: {exc}") from None
+        for attempt in range(WP_429_RETRIES + 1):
+            self._pace()
+            try:
+                resp = self.session.request(method, self._url(path), **kwargs)
+            except requests.RequestException as exc:
+                raise WordPressError(f"could not connect to {self.base}: {exc}") from None
+            if resp.status_code != 429 or attempt == WP_429_RETRIES:
+                break
+            wait = retry_after_seconds(resp) or 30 * (attempt + 1)
+            log.warning("  Your website says 'too many requests' (HTTP 429) - waiting %d seconds, then trying again...", wait)
+            time.sleep(wait)
+        if resp.status_code == 429:
+            raise WordPressRateLimitError(explain_wp_error(429, None, resp.text), 429, None, resp.headers)
         try:
             body = resp.json()
         except ValueError:
@@ -595,6 +624,14 @@ class WordPress:
                 resp.status_code,
             )
         return body
+
+    def _pace(self):
+        """Wait so requests are at least request_delay seconds apart (hosting firewalls dislike bursts)."""
+        if self.request_delay and self._last_request is not None:
+            wait = self.request_delay - (time.monotonic() - self._last_request)
+            if wait > 0:
+                time.sleep(wait)
+        self._last_request = time.monotonic()
 
     def me(self):
         """GET /users/me - proves the login works.
@@ -688,6 +725,8 @@ class WordPress:
                 tag_id = self.tag_id(name)
                 if tag_id:
                     ids.append(tag_id)
+            except WordPressRateLimitError:
+                raise
             except WordPressError as exc:
                 log.warning("  Could not create tag '%s' (%s) - continuing without it.", name, exc)
         return ids
@@ -716,10 +755,8 @@ class WordPress:
             ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
                    "image/webp": ".webp"}.get(ctype) or mimetypes.guess_extension(ctype) or ".jpg"
             stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(path).stem).strip("-")[:60] or "news-image"
-            media = self.request(
-                "POST", "/media", data=data, timeout=60,
-                headers={"Content-Type": ctype, "Content-Disposition": f'attachment; filename="{stem}{ext}"'},
-            )
+            # Sent like a browser file upload: some hosting firewalls block raw uploads (HTTP 406).
+            media = self.request("POST", "/media", files={"file": (f"{stem}{ext}", data, ctype)}, timeout=60)
             media_id = media.get("id")
             if media_id and alt_text:
                 try:
@@ -727,6 +764,8 @@ class WordPress:
                 except WordPressError:
                     pass  # alt text is a nice-to-have
             return media_id
+        except WordPressRateLimitError:
+            raise
         except Exception as exc:
             log.warning("  Could not add the featured image (%s). Posting without an image.", exc)
             return None
@@ -861,6 +900,7 @@ def run(config_path=DEFAULT_CONFIG, seen_path=DEFAULT_SEEN, dry_run=False):
             log.error("Missing secret(s): %s. Add them as GitHub repository secrets (see README).", ", ".join(missing))
             return 1
         wp, ai = make_clients()
+        wp.request_delay = settings["wp_request_delay_sec"]
         log.info("AI: model %s at %s", ai.model, ai.base_url)
         log.info("Checking the WordPress login at %s ...", wp.base)
         try:
@@ -903,7 +943,7 @@ def run(config_path=DEFAULT_CONFIG, seen_path=DEFAULT_SEEN, dry_run=False):
         seen.save()
 
     posted = failed = 0
-    rate_limited = False
+    rate_limited = None
     for number, item in enumerate(queue, start=1):
         if number > 1 and settings["delay_between_posts_sec"]:
             log.info("Waiting %d seconds before the next post...", settings["delay_between_posts_sec"])
@@ -915,7 +955,13 @@ def run(config_path=DEFAULT_CONFIG, seen_path=DEFAULT_SEEN, dry_run=False):
         except RateLimitError as exc:
             log.warning("The AI rate limit was reached (%s).", exc)
             log.warning("Stopping this run now. Progress is saved; the rest will be posted on a later run.")
-            rate_limited = True
+            rate_limited = "AI rate limit"
+            break
+        except WordPressRateLimitError as exc:
+            log.error("  Failed: %s", exc)
+            log.warning("Stopping this run now, so no more AI articles are written that cannot be saved.")
+            failed += 1
+            rate_limited = "your website's rate limit"
             break
         except (AIError, WordPressError) as exc:
             log.error("  Failed, will retry on a later run: %s", exc)
@@ -933,7 +979,7 @@ def run(config_path=DEFAULT_CONFIG, seen_path=DEFAULT_SEEN, dry_run=False):
     log.info("")
     log.info("=== Finished: %d posted, %d failed, %d waiting for a later run%s ===",
              posted, failed, len(waiting) + (len(queue) - posted - failed),
-             " (stopped early: AI rate limit)" if rate_limited else "")
+             f" (stopped early: {rate_limited})" if rate_limited else "")
     return 1 if failed and not posted else 0
 
 
