@@ -16,6 +16,7 @@ from unittest import mock
 import requests
 
 import autopost
+import check_wp
 
 FEED_URL = "https://news.example.com/rss.xml"
 FEED2_URL = "https://other.example.org/feed"
@@ -97,6 +98,10 @@ class FakeWeb:
         #   "normal" /wp-json/, "plain" ?rest_route= (Plain permalinks), "blog" WordPress in /blog,
         #   "none" no WordPress at all (every address gives the web server's 404 page)
         self.site = "normal"
+        self.auth_error_code = "incorrect_password"
+        self.capabilities = {"edit_posts": True, "publish_posts": True, "upload_files": True,
+                             "manage_categories": True}
+        self.home_setting = WP           # the "home" address WordPress reports about itself
 
     def api_prefix(self):
         return {"normal": WP + "/wp-json/wp/v2", "plain": WP + "/?rest_route=/wp/v2",
@@ -109,7 +114,15 @@ class FakeWeb:
         if self.site == "blog":
             html = f'<html><head><link rel="https://api.w.org/" href="{WP}/blog/wp-json/" /></head></html>'
             return response(content=html.encode(), url=WP + "/")
+        if self.site == "normal":
+            return response(content=b"<html>wp-content</html>", url=WP + "/",
+                            headers={"Link": f'<{WP}/wp-json/>; rel="https://api.w.org/"'})
         return response(404, content=b"404 Not Found Proudly powered by LiteSpeed Web Server", url=WP + "/")
+
+    def rest_index(self):
+        return response(200, {"name": "My News Site", "home": self.home_setting, "url": self.home_setting,
+                              "namespaces": ["oembed/1.0", "wp/v2"],
+                              "authentication": {"application-passwords": {"endpoints": {}}}})
 
     def __call__(self, session, method, url, **kwargs):
         method = method.upper()
@@ -135,12 +148,15 @@ class FakeWeb:
             return response(content=b"\xff\xd8\xff fake jpeg", headers={"Content-Type": "image/jpeg"})
 
         prefix = self.api_prefix()
+        if prefix and method == "GET" and url == prefix[: -len("wp/v2")]:
+            return self.rest_index()
         if prefix and url.startswith(prefix + "/"):
             if not self.wp_auth_ok:
-                return response(401, {"code": "incorrect_password", "message": "The provided password is invalid."})
+                return response(401, {"code": self.auth_error_code, "message": "Sorry, you could not log in."})
             path = url[len(prefix):]
             if method == "GET" and path == "/users/me":
-                return response(200, {"id": 3, "name": "Editor", "roles": ["editor"]})
+                return response(200, {"id": 3, "name": "Editor", "roles": ["editor"],
+                                      "capabilities": self.capabilities})
             if method == "GET" and path == "/categories":
                 return response(200, [{"id": 1, "name": "Uncategorized"}, {"id": 5, "name": "World"}])
             if method == "GET" and path == "/tags":
@@ -472,6 +488,83 @@ class TestConnection(AutopostTestCase):
         self.web.ai_status = [401]
         self.assertEqual(autopost.test_connection(), 1)
         self.assertIn("AI API key is wrong", self.output())
+
+
+class TestCheckWp(AutopostTestCase):
+    def check(self, password=ENV["WP_APP_PASSWORD"]):
+        return check_wp.run(WP, "editor", password)
+
+    def test_everything_works(self):
+        self.assertEqual(self.check(), 0)
+        out = self.output()
+        self.assertIn("looks like an Application Password", out)
+        self.assertIn('https://mysite.example/wp-json/ works - site name: "My News Site"', out)
+        self.assertIn("Application Passwords are switched on", out)
+        self.assertIn("Logged in as 'Editor'", out)
+        self.assertIn("Can create new tags", out)
+        self.assertIn("id 5      World", out)
+        self.assertIn("RESULT: everything works!", out)
+        self.assertNotIn("FAIL", out)
+
+    def test_it_only_reads(self):
+        self.check()
+        self.assertEqual([c for c in self.web.calls if c[0] != "GET"], [])
+
+    def test_plain_permalinks(self):
+        self.web.site = "plain"
+        self.assertEqual(self.check(), 0)
+        out = self.output()
+        self.assertIn("NO    https://mysite.example/wp-json/ - HTTP 404 from the web server", out)
+        self.assertIn("?rest_route=/ works", out)
+        self.assertIn("Settings > Permalinks", out)
+
+    def test_no_wordpress_found(self):
+        self.web.site = "none"
+        self.assertEqual(self.check(), 1)
+        out = self.output()
+        self.assertIn("does not look like a WordPress site", out)
+        self.assertIn("FAIL  No working WordPress REST API address was found", out)
+        self.assertNotIn("Logging in", out)   # stops before trying the password
+
+    def test_wrong_password(self):
+        self.web.wp_auth_ok = False
+        self.assertEqual(self.check(), 1)
+        self.assertIn("the username is right, the password is wrong", self.output())
+
+    def test_host_strips_the_login_header(self):
+        self.web.wp_auth_ok = False
+        self.web.auth_error_code = "rest_not_logged_in"
+        self.assertEqual(self.check(), 1)
+        out = self.output()
+        self.assertIn("WordPress did not receive any login at all", out)
+        self.assertIn("SetEnvIf Authorization", out)
+
+    def test_normal_password_is_flagged(self):
+        self.check(password="MyDogRex2020!")
+        self.assertIn("does not look like an Application Password", self.output())
+
+    def test_author_cannot_create_tags(self):
+        self.web.capabilities = {"edit_posts": True, "publish_posts": True, "upload_files": True}
+        self.assertEqual(self.check(), 0)   # a warning, not a failure
+        self.assertIn("WARN  Can NOT create new tags", self.output())
+
+    def test_user_who_cannot_post_fails(self):
+        self.web.capabilities = {"read": True}
+        self.assertEqual(self.check(), 1)
+        self.assertIn("FAIL  Can NOT create posts", self.output())
+
+    def test_wrong_site_address_is_pointed_out(self):
+        self.web.home_setting = "https://www.mysite.example"
+        self.check()
+        out = self.output()
+        self.assertIn("WordPress says its own address is https://www.mysite.example", out)
+        self.assertIn("WP_URL = https://www.mysite.example", out)
+
+    def test_reads_secrets_from_environment_without_asking(self):
+        with mock.patch("builtins.input") as ask, mock.patch("getpass.getpass") as ask_password:
+            self.assertEqual(check_wp.main([]), 0)
+        ask.assert_not_called()
+        ask_password.assert_not_called()
 
 
 if __name__ == "__main__":

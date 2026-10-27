@@ -163,11 +163,29 @@ After that, it runs by itself every hour at minute 17 (UTC). You'll see a small 
 
 ## Running it on your own computer (optional)
 
-You need Python 3.12 or newer.
+You need Python 3.12 or newer. Open a terminal in this project folder and install the two libraries once:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+### Check your WordPress connection
+
+```bash
+python check_wp.py
+```
+
+It asks for your site address, username and Application Password. Nothing you type is saved, and the password stays hidden while you type or paste it. Then it checks five things and marks each one `OK`, `WARN` or `FAIL`, with a `->` tip for anything that's wrong:
+
+1. **Homepage:** does your site open, and does it look like WordPress?
+2. **REST API:** does the address the auto-poster uses work? It tries `/wp-json/` and then `?rest_route=`.
+3. **Login:** does the Application Password work? It also tells apart "wrong password" and "your host removes the login header".
+4. **Permissions:** can this user create posts, publish, upload images and create tags?
+5. **Categories:** your category IDs, ready to copy into `feeds.json`.
+
+At the end it tells you the exact `WP_URL` to put in your GitHub secret. It only *reads* from your site. It never creates, changes or deletes anything.
+
+### Try a dry run
 
 ```bash
 python autopost.py --dry-run
@@ -189,6 +207,8 @@ python -m unittest -v
 ---
 
 ## Troubleshooting
+
+**Start here:** run `python check_wp.py` on your computer (see above). It tests each part of the WordPress connection separately and tells you which one is broken.
 
 | Message in the log | What it means / what to do |
 |---|---|
@@ -220,4 +240,5 @@ python -m unittest -v
 | `seen.json` | The script's memory of handled items (updated automatically, starts as `[]`) |
 | `requirements.txt` | The two small Python libraries it needs (`feedparser`, `requests`) |
 | `.github/workflows/autopost.yml` | Tells GitHub to run the script every hour |
+| `check_wp.py` | Checks the WordPress connection step by step (run it on your computer) |
 | `test_autopost.py` | Offline tests (fake RSS, AI and WordPress) |

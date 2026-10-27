@@ -475,7 +475,17 @@ def normalize_wp_url(url):
 def explain_wp_error(status, body, raw_text=""):
     wp_code = body.get("code", "") if isinstance(body, dict) else ""
     wp_msg = clean_text(body.get("message", "")) if isinstance(body, dict) else short(raw_text, 200)
-    if status == 401:
+    if status == 401 and wp_code == "rest_not_logged_in":
+        hint = ("401 = WordPress did not receive any login at all. Your host is probably removing the "
+                "'Authorization' header before it reaches WordPress (see README > Troubleshooting).")
+    elif status == 401 and wp_code in ("invalid_username", "invalid_email"):
+        hint = ("401 = wrong username or Application Password: WordPress does not know this username. "
+                "Use the username you log in with.")
+    elif status == 401 and wp_code == "incorrect_password":
+        hint = ("401 = wrong username or Application Password: the username is right, the password is wrong. "
+                "Use an Application Password (24 letters/numbers), NOT your normal login password, "
+                "or create a new one.")
+    elif status == 401:
         hint = ("401 = wrong username or Application Password. Use the Application Password "
                 "(24 letters in groups of 4), NOT your normal login password. If both are right, your "
                 "host may be removing the 'Authorization' header (see README > Troubleshooting).")
@@ -497,6 +507,21 @@ def explain_wp_error(status, body, raw_text=""):
     details = " ".join(x for x in (wp_code, wp_msg) if x)
     who = "WordPress" if isinstance(body, dict) else "the web server"
     return f"{hint}" + (f" ({who} said: {details})" if details else "")
+
+
+def api_root_from_page(resp):
+    """The REST API address a WordPress page announces (Link header or <link rel="https://api.w.org/">), or None."""
+    root = resp.links.get("https://api.w.org/", {}).get("url")
+    if not root:
+        text = resp.text[:300000] if resp.text else ""
+        for tag in re.findall(r"<link\b[^>]*>", text, re.I):
+            match = re.search(r"""href=["']([^"']+)""", tag)
+            if "api.w.org" in tag and match:
+                root = html.unescape(match.group(1))
+                break
+    if root and not root.endswith("/"):
+        root += "/"
+    return root
 
 
 class WordPress:
@@ -587,16 +612,7 @@ class WordPress:
         except requests.RequestException as exc:
             return None, f"Opening the homepage {home} failed ({exc})"
         text = resp.text[:300000] if resp.text else ""
-        root = resp.links.get("https://api.w.org/", {}).get("url")
-        if not root:
-            for tag in re.findall(r"<link\b[^>]*>", text, re.I):
-                match = re.search(r"""href=["']([^"']+)""", tag)
-                if "api.w.org" in tag and match:
-                    root = html.unescape(match.group(1))
-                    break
-        if root and not root.endswith("/"):
-            root += "/"
-
+        root = api_root_from_page(resp)
         moved = urlparse(resp.url or home).netloc != urlparse(home).netloc
         if moved:
             note = f"The homepage redirects to {resp.url} - put that address in WP_URL"
