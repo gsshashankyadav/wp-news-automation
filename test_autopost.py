@@ -4,6 +4,7 @@ images) is answered by a fake web server inside the test.
 
 Run them with:   python -m unittest -v
 """
+import base64
 import io
 import json
 import os
@@ -102,6 +103,8 @@ class FakeWeb:
         self.capabilities = {"edit_posts": True, "publish_posts": True, "upload_files": True,
                              "manage_categories": True}
         self.home_setting = WP           # the "home" address WordPress reports about itself
+        self.redirect_api_to = None      # e.g. "https://www.mysite.example/..." -> API answers 301
+        self.sessions = []               # requests.Session objects used (to inspect their headers)
 
     def api_prefix(self):
         return {"normal": WP + "/wp-json/wp/v2", "plain": WP + "/?rest_route=/wp/v2",
@@ -127,6 +130,7 @@ class FakeWeb:
     def __call__(self, session, method, url, **kwargs):
         method = method.upper()
         self.calls.append((method, url, kwargs))
+        self.sessions.append(session)
         params = kwargs.get("params") or {}
 
         if url in self.feeds:
@@ -151,6 +155,8 @@ class FakeWeb:
         if prefix and method == "GET" and url == prefix[: -len("wp/v2")]:
             return self.rest_index()
         if prefix and url.startswith(prefix + "/"):
+            if self.redirect_api_to:
+                return response(301, content=b"", headers={"Location": self.redirect_api_to})
             if not self.wp_auth_ok:
                 return response(401, {"code": self.auth_error_code, "message": "Sorry, you could not log in."})
             path = url[len(prefix):]
@@ -436,6 +442,34 @@ class TestRuns(AutopostTestCase):
         self.assertIn("https://img.example/zero.jpg", out)
 
 
+class TestLoginDelivery(AutopostTestCase):
+    def test_login_is_also_sent_in_backup_header(self):
+        # For servers that drop "Authorization"; wordpress-login-fix.php reads this one instead.
+        self.run_autopost()
+        wp_sessions = [sess for (m, u, _), sess in zip(self.web.calls, self.web.sessions) if u.startswith(WP)]
+        expected = "Basic " + base64.b64encode(f"{ENV['WP_USER']}:{ENV['WP_APP_PASSWORD']}".encode()).decode()
+        self.assertTrue(wp_sessions)
+        for sess in wp_sessions:
+            self.assertEqual(sess.headers.get("X-WP-Authorization"), expected)
+            self.assertEqual(sess.auth, (ENV["WP_USER"], ENV["WP_APP_PASSWORD"]))
+
+    def test_login_is_never_sent_to_other_sites(self):
+        self.run_autopost()
+        for (m, url, _), sess in zip(self.web.calls, self.web.sessions):
+            if not url.startswith(WP):
+                self.assertNotIn("X-WP-Authorization", sess.headers, url)
+
+    def test_redirect_is_reported_not_followed(self):
+        self.web.redirect_api_to = "https://elsewhere.example/wp-json/wp/v2/users/me"
+        self.assertEqual(self.run_autopost(), 1)
+        out = self.output()
+        self.assertIn("redirects to https://elsewhere.example/", out)
+        self.assertIn("WP_URL", out)
+        for _, url, kwargs in self.web.calls:
+            if url.startswith(WP + "/wp-json/"):
+                self.assertFalse(kwargs.get("allow_redirects", True))
+
+
 class TestFindingTheRestApi(AutopostTestCase):
     def test_plain_permalinks_site_uses_rest_route(self):
         self.web.site = "plain"
@@ -537,6 +571,8 @@ class TestCheckWp(AutopostTestCase):
         self.assertEqual(self.check(), 1)
         out = self.output()
         self.assertIn("WordPress did not receive any login at all", out)
+        self.assertIn("Code Snippets", out)
+        self.assertIn("wordpress-login-fix.php", out)
         self.assertIn("RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]", out)
         self.assertNotIn("Post name", out)   # permalinks are already fine on this site
 

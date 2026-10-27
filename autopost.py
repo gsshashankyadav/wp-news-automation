@@ -22,6 +22,7 @@ Secrets (environment variables only, never written in the code):
 from __future__ import annotations
 
 import argparse
+import base64
 import calendar
 import html
 import json
@@ -476,8 +477,9 @@ def explain_wp_error(status, body, raw_text=""):
     wp_code = body.get("code", "") if isinstance(body, dict) else ""
     wp_msg = clean_text(body.get("message", "")) if isinstance(body, dict) else short(raw_text, 200)
     if status == 401 and wp_code == "rest_not_logged_in":
-        hint = ("401 = WordPress did not receive any login at all. Your host is probably removing the "
-                "'Authorization' header before it reaches WordPress (see README > Troubleshooting).")
+        hint = ("401 = WordPress did not receive any login at all. Your web server removes the login "
+                "('Authorization' header) before it reaches WordPress. Fix: add wordpress-login-fix.php "
+                "with the Code Snippets plugin (see README > Troubleshooting).")
     elif status == 401 and wp_code in ("invalid_username", "invalid_email"):
         hint = ("401 = wrong username or Application Password: WordPress does not know this username. "
                 "Use the username you log in with.")
@@ -532,6 +534,10 @@ class WordPress:
         self.session = requests.Session()
         self.session.auth = (user, app_password)
         self.session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
+        # Some web servers (often LiteSpeed) drop the normal "Authorization" header. The same login
+        # is also sent as X-WP-Authorization, which wordpress-login-fix.php hands on to WordPress.
+        token = base64.b64encode(f"{user}:{app_password}".encode()).decode()
+        self.session.headers["X-WP-Authorization"] = f"Basic {token}"
         # Where the REST API lives. me() changes it if the site uses another address
         # (e.g. https://example.com/?rest_route=/ on sites with "Plain" permalinks).
         self.api_root = self.base + "/wp-json/"
@@ -542,6 +548,9 @@ class WordPress:
 
     def request(self, method, path, **kwargs):
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        # No redirects: they would carry the X-WP-Authorization login to whatever address
+        # they point at, and they turn POSTs into GETs anyway.
+        kwargs.setdefault("allow_redirects", False)
         try:
             resp = self.session.request(method, self._url(path), **kwargs)
         except requests.RequestException as exc:
@@ -550,11 +559,15 @@ class WordPress:
             body = resp.json()
         except ValueError:
             body = None
+        if 300 <= resp.status_code < 400:
+            target = resp.headers.get("Location", "another address")
+            raise WordPressError(
+                f"{self._url(path)} redirects to {target}. Put the address your site really uses "
+                f"(for example with or without www) in WP_URL.",
+                resp.status_code,
+            )
         if resp.status_code >= 400:
-            message = explain_wp_error(resp.status_code, body, resp.text)
-            if resp.history and urlparse(resp.url).netloc != urlparse(self.base).netloc:
-                message += f" Note: {self.base} redirects to {resp.url} - put that address in WP_URL."
-            raise WordPressError(message, resp.status_code, body)
+            raise WordPressError(explain_wp_error(resp.status_code, body, resp.text), resp.status_code, body)
         if body is None:
             raise WordPressError(
                 f"WordPress answered with a web page instead of JSON ({body_snippet(resp, 150)}). "
@@ -571,8 +584,8 @@ class WordPress:
         try:
             return self.request("GET", "/users/me", params={"context": "edit"})
         except WordPressError as exc:
-            if exc.status is None or exc.body:
-                raise  # no connection at all, or WordPress itself answered (e.g. 401): report as is
+            if exc.status is None or exc.body or 300 <= exc.status < 400:
+                raise  # no connection, WordPress itself answered (e.g. 401), or a redirect: report as is
             first_error = exc
 
         original_root = self.api_root

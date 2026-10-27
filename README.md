@@ -213,7 +213,7 @@ python -m unittest -v
 | Message in the log | What it means / what to do |
 |---|---|
 | `401 = wrong username or Application Password` | Check `WP_USER` (username) and `WP_APP_PASSWORD` (the **Application** Password, not your normal one). |
-| `401 = WordPress did not receive any login at all` (`rest_not_logged_in`) | Your web server (often LiteSpeed or Apache) drops the login before it reaches WordPress. **If your permalinks are set to "Plain"**, go to **Settings → Permalinks**, choose **Post name**, and click **Save Changes**. WordPress then writes `.htaccess` rules that let the login through, and `/wp-json/` starts working too. Old `?p=123` links still redirect to the new addresses. **Otherwise**, add these two lines at the top of `.htaccess` in your site's main folder (hosting File Manager → `public_html`): `RewriteEngine On` and `RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]`. Or ask your host to "pass the HTTP Authorization header to PHP". |
+| `401 = WordPress did not receive any login at all` (`rest_not_logged_in`) | Your web server (often LiteSpeed) drops the login before it reaches WordPress. See **Fixing "did not receive any login"** below. |
 | `403 = logged in but not allowed` | Give the user the **Editor** or **Administrator** role. Or a security plugin (Wordfence, iThemes, etc.), Cloudflare, or your host is blocking the REST API or GitHub's servers. Allow `/wp-json/` in that tool. |
 | `404 = not found` | Check `WP_URL`. Make sure no plugin disables the REST API. |
 | `answered with a web page instead of JSON` | Your host or a plugin shows a "checking your browser" / captcha page to robots. This often happens on very cheap or free hosting. Allow the REST API in that tool, or use a different host. |
@@ -224,6 +224,19 @@ python -m unittest -v
 | `Could not read this feed` | The feed address is wrong or the site is down. Open the URL in your browser; it should show XML text. The other feeds still run. |
 | The "Save seen.json" step fails with `403` / `permission denied` | **Settings → Actions → General → Workflow permissions** → choose **Read and write permissions** → Save. |
 | The workflow stopped running by itself | GitHub pauses scheduled workflows in repositories with no activity for 60 days. Open **Actions** and enable it again. Note that scheduled runs can also start a few minutes late, or be skipped when GitHub is very busy. |
+
+### Fixing "did not receive any login"
+
+Some web servers, often LiteSpeed, remove the normal login header before WordPress can read it. The auto-poster also sends the login under a second name (`X-WP-Authorization`), and a small snippet passes it on to WordPress. WordPress still checks the Application Password exactly as usual. Your normal password doesn't work through it.
+
+1. **If your permalinks are "Plain"**, first go to **Settings → Permalinks**, choose **Post name**, click **Save Changes**, and run `python check_wp.py` again. Sometimes that's enough. Old `?p=123` links still redirect to the new addresses.
+2. **Still failing? Add the snippet.** This is done from the WordPress dashboard, so no cPanel is needed:
+   1. **Plugins → Add New**, search for **Code Snippets**, then click **Install** and **Activate**.
+   2. **Snippets → Add New**, title `Auto-poster login fix`.
+   3. Open `wordpress-login-fix.php` from this project and paste the code **below** the comment block. Leave out the first line `<?php` and the comment.
+   4. Choose **Run snippet everywhere**, then click **Save Changes and Activate**.
+   5. Run `python check_wp.py` again.
+3. **If you do have hosting file access**, you can instead add these two lines at the top of `.htaccess` in your site's main folder: `RewriteEngine On` and `RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]`.
 
 ## Good to know
 
@@ -242,4 +255,5 @@ python -m unittest -v
 | `requirements.txt` | The two small Python libraries it needs (`feedparser`, `requests`) |
 | `.github/workflows/autopost.yml` | Tells GitHub to run the script every hour |
 | `check_wp.py` | Checks the WordPress connection step by step (run it on your computer) |
+| `wordpress-login-fix.php` | Snippet for WordPress (via the Code Snippets plugin), only needed if your server drops the login |
 | `test_autopost.py` | Offline tests (fake RSS, AI and WordPress) |

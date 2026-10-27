@@ -192,17 +192,18 @@ def check_login(wp, r):
             if "rest_route=" in wp.api_root:
                 # "Plain" permalinks: WordPress has not written its .htaccess rules, which include
                 # the line that passes the login (Authorization header) on to WordPress.
-                r.tip("Easiest fix: Settings > Permalinks > choose 'Post name' > Save Changes.")
+                r.tip("First try: Settings > Permalinks > choose 'Post name' > Save Changes, then run this again.")
                 r.tip("WordPress then writes .htaccess rules that pass the login through, and /wp-json/ starts working.")
                 r.tip("Old links like ?p=123 keep working - WordPress redirects them to the new addresses.")
-                r.tip("Or, to keep 'Plain' permalinks, add these 2 lines at the top of the .htaccess file")
-                r.tip("in your site's main folder (hosting File Manager > public_html):")
-            else:
-                r.tip("Fix: add these 2 lines at the top of the .htaccess file in your site's main folder")
-                r.tip("(hosting File Manager > public_html):")
+            r.tip("Fix from the WordPress dashboard (no cPanel needed):")
+            r.tip("  1. Plugins > Add New > search 'Code Snippets' > Install > Activate.")
+            r.tip("  2. Snippets > Add New, title 'Auto-poster login fix'.")
+            r.tip("  3. Paste the code from wordpress-login-fix.php (in this project folder),")
+            r.tip("     without the first line '<?php' and the comment block.")
+            r.tip("  4. Choose 'Run snippet everywhere' > Save Changes and Activate. Then run this check again.")
+            r.tip("If you have hosting file access instead, these 2 lines at the top of .htaccess also work:")
             r.tip("    RewriteEngine On")
             r.tip("    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]")
-            r.tip("Or ask your host to 'pass the HTTP Authorization header to PHP'.")
         return None
     roles = me.get("roles") or []
     r.ok(f"Logged in as '{me.get('name')}' (user id {me.get('id')}"
