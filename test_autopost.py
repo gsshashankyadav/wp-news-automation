@@ -103,6 +103,7 @@ class FakeWeb:
         self.capabilities = {"edit_posts": True, "publish_posts": True, "upload_files": True,
                              "manage_categories": True}
         self.home_setting = WP           # the "home" address WordPress reports about itself
+        self.login_fix = None            # what wordpress-login-fix.php reports: None, "missing", "received"
         self.redirect_api_to = None      # e.g. "https://www.mysite.example/..." -> API answers 301
         self.sessions = []               # requests.Session objects used (to inspect their headers)
 
@@ -158,7 +159,9 @@ class FakeWeb:
             if self.redirect_api_to:
                 return response(301, content=b"", headers={"Location": self.redirect_api_to})
             if not self.wp_auth_ok:
-                return response(401, {"code": self.auth_error_code, "message": "Sorry, you could not log in."})
+                headers = {"X-Autopost-Login-Fix": f"v2; login={self.login_fix}"} if self.login_fix else {}
+                return response(401, {"code": self.auth_error_code, "message": "Sorry, you could not log in."},
+                                headers=headers)
             path = url[len(prefix):]
             if method == "GET" and path == "/users/me":
                 return response(200, {"id": 3, "name": "Editor", "roles": ["editor"],
@@ -575,6 +578,39 @@ class TestCheckWp(AutopostTestCase):
         self.assertIn("wordpress-login-fix.php", out)
         self.assertIn("RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]", out)
         self.assertNotIn("Post name", out)   # permalinks are already fine on this site
+
+    def test_login_fix_not_running(self):
+        self.web.wp_auth_ok = False
+        self.web.auth_error_code = "rest_not_logged_in"
+        self.check()
+        out = self.output()
+        self.assertIn("[login-fix snippet: NOT running on the site]", out)
+        self.assertIn("The login-fix snippet is NOT running", out)
+        self.assertIn("'// 1. Find the login'", out)
+
+    def test_login_fix_running_but_no_login_arrives(self):
+        self.web.wp_auth_ok = False
+        self.web.auth_error_code = "rest_not_logged_in"
+        self.web.login_fix = "missing"
+        self.assertEqual(self.check(), 1)
+        out = self.output()
+        self.assertIn("[login-fix snippet: running, but no login reached it]", out)
+        self.assertIn("Please pass the HTTP Authorization header to PHP", out)
+        self.assertNotIn("Plugins > Add New", out)   # it is already installed - no point repeating the steps
+
+    def test_login_fix_got_login_but_still_fails(self):
+        self.web.wp_auth_ok = False
+        self.web.auth_error_code = "rest_not_logged_in"
+        self.web.login_fix = "received"
+        self.check()
+        self.assertIn("Please share this whole output", self.output())
+
+    def test_autopost_log_shows_login_fix_state(self):
+        self.web.wp_auth_ok = False
+        self.web.auth_error_code = "rest_not_logged_in"
+        self.web.login_fix = "missing"
+        self.assertEqual(self.run_autopost(), 1)
+        self.assertIn("[login-fix snippet: running, but no login reached it]", self.output())
 
     def test_plain_permalinks_and_login_header_stripped(self):
         # What LiteSpeed hosts with "Plain" permalinks show: no .htaccess rules, so no login gets through.

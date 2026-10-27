@@ -98,10 +98,11 @@ class AIFormatError(AIError):
 class WordPressError(Exception):
     """A WordPress REST API call failed."""
 
-    def __init__(self, message, status=None, body=None):
+    def __init__(self, message, status=None, body=None, headers=None):
         super().__init__(message)
         self.status = status
         self.body = body if isinstance(body, dict) else {}
+        self.headers = headers or {}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -477,8 +478,8 @@ def explain_wp_error(status, body, raw_text=""):
     wp_code = body.get("code", "") if isinstance(body, dict) else ""
     wp_msg = clean_text(body.get("message", "")) if isinstance(body, dict) else short(raw_text, 200)
     if status == 401 and wp_code == "rest_not_logged_in":
-        hint = ("401 = WordPress did not receive any login at all. Your web server removes the login "
-                "('Authorization' header) before it reaches WordPress. Fix: add wordpress-login-fix.php "
+        hint = ("401 = WordPress did not receive any login at all. Usually the web server removes the "
+                "login header, or another plugin gets in the way. Fix: add wordpress-login-fix.php "
                 "with the Code Snippets plugin (see README > Troubleshooting).")
     elif status == 401 and wp_code in ("invalid_username", "invalid_email"):
         hint = ("401 = wrong username or Application Password: WordPress does not know this username. "
@@ -509,6 +510,22 @@ def explain_wp_error(status, body, raw_text=""):
     details = " ".join(x for x in (wp_code, wp_msg) if x)
     who = "WordPress" if isinstance(body, dict) else "the web server"
     return f"{hint}" + (f" ({who} said: {details})" if details else "")
+
+
+def login_fix_state(headers):
+    """What the wordpress-login-fix.php snippet reported in its X-Autopost-Login-Fix header:
+    None (snippet not running), "missing" (no login reached it) or "received"."""
+    value = (headers or {}).get("X-Autopost-Login-Fix", "")
+    if not value:
+        return None
+    return "received" if "login=received" in value else "missing"
+
+
+LOGIN_FIX_NOTES = {
+    None: " [login-fix snippet: NOT running on the site]",
+    "missing": " [login-fix snippet: running, but no login reached it]",
+    "received": " [login-fix snippet: running and got the login]",
+}
 
 
 def api_root_from_page(resp):
@@ -567,7 +584,10 @@ class WordPress:
                 resp.status_code,
             )
         if resp.status_code >= 400:
-            raise WordPressError(explain_wp_error(resp.status_code, body, resp.text), resp.status_code, body)
+            message = explain_wp_error(resp.status_code, body, resp.text)
+            if isinstance(body, dict) and body.get("code") == "rest_not_logged_in":
+                message += LOGIN_FIX_NOTES[login_fix_state(resp.headers)]
+            raise WordPressError(message, resp.status_code, body, resp.headers)
         if body is None:
             raise WordPressError(
                 f"WordPress answered with a web page instead of JSON ({body_snippet(resp, 150)}). "

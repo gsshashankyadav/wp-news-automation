@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 import requests
 
 import autopost
-from autopost import USER_AGENT, WordPressError, api_root_from_page, env, normalize_wp_url, short
+from autopost import USER_AGENT, WordPressError, api_root_from_page, env, login_fix_state, normalize_wp_url, short
 
 TIMEOUT = 30
 
@@ -189,26 +189,44 @@ def check_login(wp, r):
     except WordPressError as exc:
         r.fail(str(exc))
         if exc.body.get("code") == "rest_not_logged_in":
-            if "rest_route=" in wp.api_root:
-                # "Plain" permalinks: WordPress has not written its .htaccess rules, which include
-                # the line that passes the login (Authorization header) on to WordPress.
-                r.tip("First try: Settings > Permalinks > choose 'Post name' > Save Changes, then run this again.")
-                r.tip("WordPress then writes .htaccess rules that pass the login through, and /wp-json/ starts working.")
-                r.tip("Old links like ?p=123 keep working - WordPress redirects them to the new addresses.")
-            r.tip("Fix from the WordPress dashboard (no cPanel needed):")
-            r.tip("  1. Plugins > Add New > search 'Code Snippets' > Install > Activate.")
-            r.tip("  2. Snippets > Add New, title 'Auto-poster login fix'.")
-            r.tip("  3. Paste the code from wordpress-login-fix.php (in this project folder),")
-            r.tip("     without the first line '<?php' and the comment block.")
-            r.tip("  4. Choose 'Run snippet everywhere' > Save Changes and Activate. Then run this check again.")
-            r.tip("If you have hosting file access instead, these 2 lines at the top of .htaccess also work:")
-            r.tip("    RewriteEngine On")
-            r.tip("    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]")
+            login_fix_tips(wp, login_fix_state(exc.headers), r)
         return None
     roles = me.get("roles") or []
     r.ok(f"Logged in as '{me.get('name')}' (user id {me.get('id')}"
          + (f", role: {', '.join(roles)})" if roles else ")"))
     return me
+
+
+def login_fix_tips(wp, state, r):
+    """Tips for rest_not_logged_in, depending on what wordpress-login-fix.php reported."""
+    if state == "missing":
+        r.tip("The login-fix snippet IS running, but no login reached it: your web server removes")
+        r.tip("both login headers. Only your host can change that. Send them this message:")
+        r.tip("  'Please pass the HTTP Authorization header to PHP for my WordPress site.'")
+        return
+    if state == "received":
+        r.tip("The login-fix snippet got the login, but WordPress still did not log in.")
+        r.tip("Please share this whole output so the cause can be found.")
+        return
+    r.tip("The login-fix snippet is NOT running on your site.")
+    if "rest_route=" in wp.api_root:
+        # "Plain" permalinks: WordPress has not written its .htaccess rules, which include
+        # the line that passes the login (Authorization header) on to WordPress.
+        r.tip("First try: Settings > Permalinks > choose 'Post name' > Save Changes, then run this again.")
+        r.tip("WordPress then writes .htaccess rules that pass the login through, and /wp-json/ starts working.")
+        r.tip("Old links like ?p=123 keep working - WordPress redirects them to the new addresses.")
+    r.tip("Fix from the WordPress dashboard (no cPanel needed):")
+    r.tip("  1. Plugins > Add New > search 'Code Snippets' > Install > Activate.")
+    r.tip("  2. Snippets > Add New, title 'Auto-poster login fix'.")
+    r.tip("  3. Paste the code from wordpress-login-fix.php (in this project folder),")
+    r.tip("     without the first line '<?php' and the comment block.")
+    r.tip("  4. Choose 'Run snippet everywhere' > Save Changes and Activate. Then run this check again.")
+    r.tip("Already added it? In Snippets, check that its switch is ON, that it runs everywhere, and")
+    r.tip("that it is the NEWEST code: it must start with '// 1. Find the login' and contain")
+    r.tip("'rest_authentication_errors'. Code Snippets turns a snippet off by itself if the code has an error.")
+    r.tip("If you have hosting file access instead, these 2 lines at the top of .htaccess also work:")
+    r.tip("    RewriteEngine On")
+    r.tip("    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]")
 
 
 def check_permissions(me, r):

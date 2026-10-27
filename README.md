@@ -227,13 +227,23 @@ python -m unittest -v
 
 ### Fixing "did not receive any login"
 
-Some web servers, often LiteSpeed, remove the normal login header before WordPress can read it. The auto-poster also sends the login under a second name (`X-WP-Authorization`), and a small snippet passes it on to WordPress. WordPress still checks the Application Password exactly as usual. Your normal password doesn't work through it.
+There are two usual causes:
+
+- **The web server removes the login header.** This is common on LiteSpeed. The auto-poster also sends the login under a second name (`X-WP-Authorization`), and the snippet passes it on to WordPress.
+- **Another plugin asks "who is logged in?" too early,** before WordPress knows the request is for the API, so WordPress skips the Application Password check. The snippet checks it again at the right moment.
+
+Either way, WordPress checks the Application Password with its own code. Your normal password doesn't work through the snippet.
+
+After you add the snippet, `check_wp.py` tells you what it sees:
+- `NOT running on the site`: the snippet is off, not saved, or an older version.
+- `running, but no login reached it`: the server removes both headers. Only your host can fix that.
+- Login `OK`: done.
 
 1. **If your permalinks are "Plain"**, first go to **Settings → Permalinks**, choose **Post name**, click **Save Changes**, and run `python check_wp.py` again. Sometimes that's enough. Old `?p=123` links still redirect to the new addresses.
 2. **Still failing? Add the snippet.** This is done from the WordPress dashboard, so no cPanel is needed:
    1. **Plugins → Add New**, search for **Code Snippets**, then click **Install** and **Activate**.
-   2. **Snippets → Add New**, title `Auto-poster login fix`.
-   3. Open `wordpress-login-fix.php` from this project and paste the code **below** the comment block. Leave out the first line `<?php` and the comment.
+   2. **Snippets → Add New**, title `Auto-poster login fix`. If you added an older version before, open that snippet and replace all of its code instead.
+   3. Open `wordpress-login-fix.php` from this project and paste the code **below** the comment block, starting at `// 1. Find the login`. Leave out the first line `<?php` and the comment.
    4. Choose **Run snippet everywhere**, then click **Save Changes and Activate**.
    5. Run `python check_wp.py` again.
 3. **If you do have hosting file access**, you can instead add these two lines at the top of `.htaccess` in your site's main folder: `RewriteEngine On` and `RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]`.
